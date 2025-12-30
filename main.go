@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Chappydev/Chirpy/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -47,13 +48,10 @@ func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
   w.Write([]byte(bodyHTML))
 }
 
-func handleValidation(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) {
   type chirpData struct {
     Body string `json:"body"`
-  }
-
-  type validity struct {
-    CleanedBody string `json:"cleaned_body"`
+    UserId string `json:"user_id"`
   }
 
   w.Header().Add("Content-Type", "application/json")
@@ -69,7 +67,10 @@ func handleValidation(w http.ResponseWriter, r *http.Request) {
   // Validate body length
   if len(chirp.Body) > 140 {
     w.WriteHeader(400)
-    w.Write([]byte("{\"error\": \"Chirp is too long\"}"))
+    resBody, err := json.Marshal(errorBody{Error: "Chirp is too long"})
+    if err == nil {
+      w.Write(resBody)
+    }
     return
   }
 
@@ -86,20 +87,79 @@ func handleValidation(w http.ResponseWriter, r *http.Request) {
   }
   cleanedBody := strings.Join(words, " ")
 
-  // Create response body
-  isValid := validity{
-    CleanedBody: cleanedBody,
-  }
-  isValidJSON, err := json.Marshal(isValid)
+  // Save the cleaned chirp
+  chirpUUID, err := uuid.Parse(chirp.UserId)
   if err != nil {
-    w.WriteHeader(500)
-    w.Write([]byte("{\"error\": \"failed to marshal the response\"}"))
+    w.WriteHeader(http.StatusBadRequest)
+    resBody, err := json.Marshal(errorBody{Error: "invalid uuid for user_id"})
+    if err == nil {
+      w.Write(resBody)
+    }
     return
+  }
+  savedChirp, err := cfg.queries.CreateChirp(r.Context(), database.CreateChirpParams{Body: cleanedBody, UserID: chirpUUID})
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+  }
+
+  chirpJSON, err := json.Marshal(savedChirp)
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Print(err)
   }
 
   // Write response
-  w.WriteHeader(200)
-  w.Write(isValidJSON)
+  w.WriteHeader(http.StatusCreated)
+  w.Write(chirpJSON)
+}
+
+func (cfg *apiConfig) handleGetAllChirps(w http.ResponseWriter, r *http.Request) {
+  allChirps, err := cfg.queries.GetAllChirps(r.Context())
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("[GET /api/chirps] Fail to fetch chirps: %v\n", err)
+    return
+  }
+
+  jsonChirps, err := json.Marshal(allChirps)
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("[GET /api/chirps] Fail to marshal chirps: %v\n", err)
+    return
+  }
+
+  w.WriteHeader(http.StatusOK)
+  w.Write(jsonChirps)
+}
+
+func (cfg *apiConfig) handleChirpByID(w http.ResponseWriter, r *http.Request) {
+  chirpIDString := r.PathValue("chirpID")
+  chirpID, err := uuid.Parse(chirpIDString)
+  if err != nil {
+    w.WriteHeader(http.StatusBadRequest)
+    resBody, err := json.Marshal(errorBody{Error: "Invalid id"})
+    if err == nil {
+      w.Write(resBody)
+    }
+    return
+  }
+
+  matchingChirp, err := cfg.queries.GetChirpByID(r.Context(), chirpID)
+  if err != nil {
+    w.WriteHeader(http.StatusNotFound)
+    log.Printf("[GET /api/chirps{chirpID}] Fail to fetch chirp: %v\n", err)
+    return
+  }
+
+  jsonChirp, err := json.Marshal(matchingChirp)
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("[GET /api/chirps/{chirpID}] Fail to marshal chirp: %v\n", err)
+    return
+  }
+
+  w.WriteHeader(http.StatusOK)
+  w.Write(jsonChirp)
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -194,9 +254,11 @@ func main() {
   mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
   mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
   mux.HandleFunc("POST /admin/reset", apiCfg.handleReset)
-  mux.HandleFunc("POST /api/validate_chirp", handleValidation)
+  mux.HandleFunc("POST /api/chirps", apiCfg.handleCreateChirp)
   mux.HandleFunc("GET /api/healthz", handleHealthz)
   mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
+  mux.HandleFunc("GET /api/chirps", apiCfg.handleGetAllChirps)
+  mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleChirpByID)
 
   // Server config
   server := &http.Server{
