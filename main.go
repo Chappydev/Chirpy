@@ -10,7 +10,9 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/Chappydev/Chirpy/internal/auth"
 	"github.com/Chappydev/Chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -21,6 +23,7 @@ type apiConfig struct {
   fileserverHits atomic.Int32
   queries *database.Queries
   platform string
+  secret string
 }
 
 type errorBody struct {
@@ -51,8 +54,21 @@ func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) {
   type chirpData struct {
     Body string `json:"body"`
-    UserId string `json:"user_id"`
+    UserID string `json:"user_id"`
   }
+
+  token, err := auth.GetBearerToken(r.Header)
+  if err != nil {
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  }
+
+  userID, err := auth.ValidateJWT(token, cfg.secret)
+  if err != nil {
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  }
+
 
   w.Header().Add("Content-Type", "application/json")
 
@@ -88,16 +104,7 @@ func (cfg *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) 
   cleanedBody := strings.Join(words, " ")
 
   // Save the cleaned chirp
-  chirpUUID, err := uuid.Parse(chirp.UserId)
-  if err != nil {
-    w.WriteHeader(http.StatusBadRequest)
-    resBody, err := json.Marshal(errorBody{Error: "invalid uuid for user_id"})
-    if err == nil {
-      w.Write(resBody)
-    }
-    return
-  }
-  savedChirp, err := cfg.queries.CreateChirp(r.Context(), database.CreateChirpParams{Body: cleanedBody, UserID: chirpUUID})
+  savedChirp, err := cfg.queries.CreateChirp(r.Context(), database.CreateChirpParams{Body: cleanedBody, UserID: userID})
   if err != nil {
     w.WriteHeader(http.StatusInternalServerError)
   }
@@ -162,6 +169,82 @@ func (cfg *apiConfig) handleChirpByID(w http.ResponseWriter, r *http.Request) {
   w.Write(jsonChirp)
 }
 
+func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
+  type bodyData struct {
+    Email            string `json:"email"`
+    Password         string `json:"password"`
+    ExpiresInSeconds int64  `json:"expires_in_seconds,omitempty"`
+  }
+
+  type responseBodyStruct struct {
+    ID        uuid.UUID `json:"id"`
+    CreatedAt time.Time `json:"created_at"`
+    UpdatedAt time.Time `json:"updated_at"`
+    Email     string    `json:"email"`
+    Token     string    `json:"token"`
+  }
+
+  expireIn := time.Hour
+
+  decoder := json.NewDecoder(r.Body)
+  data := bodyData{}
+  if err := decoder.Decode(&data); err != nil {
+    w.WriteHeader(http.StatusBadRequest)
+    resBody, err := json.Marshal(errorBody{Error: "Malformed body (must have email and password fields)"})
+    if err == nil {
+      w.Write(resBody)
+    }
+    return
+  }
+
+  if data.ExpiresInSeconds > 0 {
+    requestedDuration := time.Duration(data.ExpiresInSeconds * int64(time.Second))
+
+    if requestedDuration < expireIn {
+      expireIn = requestedDuration
+    }
+  }
+
+  user, err := cfg.queries.GetUserWithPasswordByEmail(r.Context(), data.Email)
+  if err != nil {
+    w.WriteHeader(http.StatusUnauthorized)
+    resBody, err := json.Marshal(errorBody{Error: "incorrect email or password"})
+    if err == nil {
+      w.Write(resBody)
+    }
+    return
+  }
+
+  passwordMatches, _ := auth.CheckPasswordHash(data.Password, user.HashedPassword)
+  if !passwordMatches {
+    w.WriteHeader(http.StatusUnauthorized)
+    resBody, err := json.Marshal(errorBody{Error: "incorrect email or password"})
+    if err == nil {
+      w.Write(resBody)
+    }
+    return
+  }
+
+  token, err := auth.MakeJWT(user.ID, cfg.secret, expireIn)
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("failed to make jwt: %v\n", err)
+    return
+  }
+
+  // Return the user minus the password in the response body
+  resBodyStruct := responseBodyStruct{ID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Token: token}
+  resBody, err := json.Marshal(resBodyStruct)
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Print("[POST /api/login] Failed to marshal noPassUser")
+  }
+  w.WriteHeader(http.StatusOK)
+  w.Write(resBody)
+
+}
+
+
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
   w.Header().Add("Content-Type", "text/plain; charset=utf-8")
   w.WriteHeader(200)
@@ -194,6 +277,7 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
   type NewUserParams struct {
     Email string `json:"email"`
+    Password string `json:"password"`
   }
 
   decoder := json.NewDecoder(r.Body)
@@ -207,7 +291,14 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  user, err := cfg.queries.CreateUser(r.Context(), userParams.Email)
+  // Hash the password
+  hashedPassword, err := auth.HashPassword(userParams.Password)
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("[POST /api/users] Failed to hash password: %v\n", err)
+  }
+
+  user, err := cfg.queries.CreateUser(r.Context(), database.CreateUserParams{Email: userParams.Email, HashedPassword: hashedPassword})
   if err != nil {
     w.WriteHeader(http.StatusInternalServerError)
     resBody, err := json.Marshal(errorBody{Error: err.Error()})
@@ -240,6 +331,7 @@ func main() {
 
   godotenv.Load()
   
+  apiCfg.secret = os.Getenv("JWT_SECRET")
   apiCfg.platform = os.Getenv("PLATFORM")
 
   // Set up database queries
@@ -259,6 +351,7 @@ func main() {
   mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
   mux.HandleFunc("GET /api/chirps", apiCfg.handleGetAllChirps)
   mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleChirpByID)
+  mux.HandleFunc("POST /api/login", apiCfg.handleLogin)
 
   // Server config
   server := &http.Server{
