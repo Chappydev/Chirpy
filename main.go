@@ -173,18 +173,19 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
   type bodyData struct {
     Email            string `json:"email"`
     Password         string `json:"password"`
-    ExpiresInSeconds int64  `json:"expires_in_seconds,omitempty"`
   }
 
   type responseBodyStruct struct {
-    ID        uuid.UUID `json:"id"`
-    CreatedAt time.Time `json:"created_at"`
-    UpdatedAt time.Time `json:"updated_at"`
-    Email     string    `json:"email"`
-    Token     string    `json:"token"`
+    ID           uuid.UUID `json:"id"`
+    CreatedAt    time.Time `json:"created_at"`
+    UpdatedAt    time.Time `json:"updated_at"`
+    Email        string    `json:"email"`
+    Token        string    `json:"token"`
+    RefreshToken string    `json:"refresh_token"`
   }
 
-  expireIn := time.Hour
+  tokenExpireIn := time.Hour
+  refreshExpiresIn := time.Hour * 24 * 60
 
   decoder := json.NewDecoder(r.Body)
   data := bodyData{}
@@ -195,14 +196,6 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
       w.Write(resBody)
     }
     return
-  }
-
-  if data.ExpiresInSeconds > 0 {
-    requestedDuration := time.Duration(data.ExpiresInSeconds * int64(time.Second))
-
-    if requestedDuration < expireIn {
-      expireIn = requestedDuration
-    }
   }
 
   user, err := cfg.queries.GetUserWithPasswordByEmail(r.Context(), data.Email)
@@ -225,7 +218,26 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  token, err := auth.MakeJWT(user.ID, cfg.secret, expireIn)
+  // Make refresh token 
+  refreshToken, err := auth.MakeRefreshToken()
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("failed to make a refresh token: %v\n", err)
+    return
+  }
+  refreshTokenData, err := cfg.queries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+    Token: refreshToken,
+    UserID: user.ID,
+    ExpiresAt: time.Now().Add(refreshExpiresIn),
+  })
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("failed to save refresh token: %v\n", err)
+    return
+  }
+
+  // Make JWT
+  token, err := auth.MakeJWT(user.ID, cfg.secret, tokenExpireIn)
   if err != nil {
     w.WriteHeader(http.StatusInternalServerError)
     log.Printf("failed to make jwt: %v\n", err)
@@ -233,7 +245,14 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
   }
 
   // Return the user minus the password in the response body
-  resBodyStruct := responseBodyStruct{ID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Token: token}
+  resBodyStruct := responseBodyStruct{
+    ID: user.ID, 
+    Email: user.Email, 
+    CreatedAt: user.CreatedAt, 
+    UpdatedAt: user.UpdatedAt, 
+    Token: token,
+    RefreshToken: refreshTokenData.Token,
+  }
   resBody, err := json.Marshal(resBodyStruct)
   if err != nil {
     w.WriteHeader(http.StatusInternalServerError)
