@@ -277,7 +277,7 @@ func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
   // Check database to see if the token from the header exists and is valid
   token, err := cfg.queries.FindRefreshToken(r.Context(), refreshToken)
-  if errors.Is(err, sql.ErrNoRows) || token.RevokedAt.Valid || token.ExpiresAt.After(time.Now()) {
+  if errors.Is(err, sql.ErrNoRows) || token.RevokedAt.Valid || time.Now().After(token.ExpiresAt) {
     // If there is no such token, or the token is invalid:
     w.WriteHeader(http.StatusUnauthorized)
     return
@@ -287,7 +287,8 @@ func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
     accessToken, err := auth.MakeJWT(token.UserID, cfg.secret, time.Hour)
     if err != nil {
       w.WriteHeader(http.StatusInternalServerError)
-      log.Printf("[POST /api/refresh] failed to fetch refreshToken: %v\n", err)
+      log.Printf("[POST /api/refresh] failed to make JWT: %v\n", err)
+      return
     }
 
     w.WriteHeader(http.StatusOK)
@@ -304,6 +305,25 @@ func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
   log.Printf("[POST /api/refresh] failed to fetch refreshToken: %v\n", err)
 }
 
+func (cfg *apiConfig) handleRevoke(w http.ResponseWriter, r *http.Request) {
+  refreshToken, err := auth.GetBearerToken(r.Header)
+  if err != nil {
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  }
+
+  err = cfg.queries.RevokeToken(r.Context(), refreshToken)
+  if errors.Is(err, sql.ErrNoRows) {
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  } else if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    return
+  }
+
+  // Successful with no content
+  w.WriteHeader(http.StatusNoContent)
+}
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
   w.Header().Add("Content-Type", "text/plain; charset=utf-8")
@@ -383,6 +403,62 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
   w.Write(resBody)
 }
 
+func (cfg *apiConfig) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
+  type requestBody struct {
+    Password string `json:"password"`
+    Email string `json:"email"`
+  }
+
+  token, err := auth.GetBearerToken(r.Header)
+  if err != nil {
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  }
+
+  userID, err := auth.ValidateJWT(token, cfg.secret)
+  if err != nil {
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  }
+
+  decoder := json.NewDecoder(r.Body)
+  var reqBody requestBody
+  if err := decoder.Decode(&reqBody); err != nil {
+    w.WriteHeader(400)
+    w.Write([]byte("{\"error\": \"failed to parse request body as json\"}"))
+    return
+  }
+
+  hashedPassword, err := auth.HashPassword(reqBody.Password)
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("[PUT /api/users] failed to hash password: %v\n", err)
+  }
+
+  updatedUser, err := cfg.queries.UpdateUserEmailAndPassword(r.Context(), database.UpdateUserEmailAndPasswordParams{
+    Email: reqBody.Email,
+    HashedPassword: hashedPassword,
+    ID: userID,
+  })
+  if errors.Is(err, sql.ErrNoRows) {
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  } else if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("[PUT /api/users] failed to update user: %v\n", err)
+    return
+  }
+  resBody, err := json.Marshal(updatedUser)
+  if err != nil {
+    w.WriteHeader(http.StatusInternalServerError)
+    log.Printf("[PUT /api/users] failed to marshal json body: %v\n", err)
+    return
+  }
+
+  w.WriteHeader(http.StatusOK)
+  w.Write(resBody)
+}
+
 func main() {
   port := "8080"
 
@@ -409,10 +485,12 @@ func main() {
   mux.HandleFunc("POST /api/chirps", apiCfg.handleCreateChirp)
   mux.HandleFunc("GET /api/healthz", handleHealthz)
   mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
+  mux.HandleFunc("PUT /api/users", apiCfg.handleUpdateUser)
   mux.HandleFunc("GET /api/chirps", apiCfg.handleGetAllChirps)
   mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleChirpByID)
   mux.HandleFunc("POST /api/login", apiCfg.handleLogin)
   mux.HandleFunc("POST /api/refresh", apiCfg.handleRefresh)
+  mux.HandleFunc("POST /api/revoke", apiCfg.handleRevoke)
 
   // Server config
   server := &http.Server{
