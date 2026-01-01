@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -263,6 +264,39 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
+  type responseBodyStruct struct {
+    Token string `json:"token"`
+  }
+
+  refreshToken, err := auth.GetBearerToken(r.Header)
+  if err != nil {
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  }
+
+  // Check database to see if the token from the header exists and is valid
+  token, err := cfg.queries.FindRefreshToken(r.Context(), refreshToken)
+  if errors.Is(err, sql.ErrNoRows) || token.RevokedAt.Valid || token.ExpiresAt.After(time.Now()) {
+    // If there is no such token, or the token is invalid:
+    w.WriteHeader(http.StatusUnauthorized)
+    return
+  } else if err == nil {
+    // If we find the token and it is valid
+    w.WriteHeader(http.StatusOK)
+    resBodyStruct := responseBodyStruct{Token: token.Token}
+    resBody, err := json.Marshal(resBodyStruct)
+    if err == nil {
+      w.Write(resBody)
+    }
+    return
+  } 
+
+  // We don't know what went wrong so Internal Error 
+  w.WriteHeader(http.StatusInternalServerError)
+  log.Printf("[POST /api/refresh] failed to fetch refreshToken: %v\n", err)
+}
+
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
   w.Header().Add("Content-Type", "text/plain; charset=utf-8")
@@ -371,6 +405,7 @@ func main() {
   mux.HandleFunc("GET /api/chirps", apiCfg.handleGetAllChirps)
   mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleChirpByID)
   mux.HandleFunc("POST /api/login", apiCfg.handleLogin)
+  mux.HandleFunc("POST /api/refresh", apiCfg.handleRefresh)
 
   // Server config
   server := &http.Server{
