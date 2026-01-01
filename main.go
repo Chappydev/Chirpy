@@ -282,9 +282,16 @@ func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusUnauthorized)
     return
   } else if err == nil {
-    // If we find the token and it is valid
+    // If we find the token and it is valid we make a new access token and send it
+
+    accessToken, err := auth.MakeJWT(token.UserID, cfg.secret, time.Hour)
+    if err != nil {
+      w.WriteHeader(http.StatusInternalServerError)
+      log.Printf("[POST /api/refresh] failed to fetch refreshToken: %v\n", err)
+    }
+
     w.WriteHeader(http.StatusOK)
-    resBodyStruct := responseBodyStruct{Token: token.Token}
+    resBodyStruct := responseBodyStruct{Token: accessToken}
     resBody, err := json.Marshal(resBodyStruct)
     if err == nil {
       w.Write(resBody)
