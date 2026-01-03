@@ -61,7 +61,8 @@ func GetBearerToken(headers http.Header) (string, error) {
   elements := strings.Split(authorization, " ")
   if elements[0] != "Bearer" {
     return "", errors.New("no bearer found in the headers")
-  } else if len(elements) != 2 {
+  } 
+  if len(elements) != 2 {
     return "", errors.New("too many arguments in bearer")
   }
 
@@ -73,4 +74,17 @@ func MakeRefreshToken() (string, error) {
   rand.Read(randomBytes)
   randomString := hex.EncodeToString(randomBytes)
   return randomString, nil
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+  authorization := headers.Get("Authorization")
+  elements := strings.Split(authorization, " ")
+  if elements[0] != "ApiKey" {
+    return "", errors.New("no apikey found in the headers")
+  } 
+  if len(elements) != 2 {
+    return "", errors.New("too many arguments in apikey")
+  }
+
+  return elements[1], nil
 }

@@ -21,7 +21,7 @@ VALUES (
   $1,
   $2
 )
-RETURNING id, created_at, updated_at, email
+RETURNING id, created_at, updated_at, email, is_chirpy_red
 `
 
 type CreateUserParams struct {
@@ -30,10 +30,11 @@ type CreateUserParams struct {
 }
 
 type CreateUserRow struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error) {
@@ -44,6 +45,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateU
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Email,
+		&i.IsChirpyRed,
 	)
 	return i, err
 }
@@ -58,7 +60,7 @@ func (q *Queries) DeleteAllUsers(ctx context.Context) error {
 }
 
 const getUserWithPasswordByEmail = `-- name: GetUserWithPasswordByEmail :one
-SELECT id, created_at, updated_at, email, hashed_password FROM users
+SELECT id, created_at, updated_at, email, hashed_password, is_chirpy_red FROM users
 WHERE $1 = email
 `
 
@@ -71,15 +73,27 @@ func (q *Queries) GetUserWithPasswordByEmail(ctx context.Context, email string) 
 		&i.UpdatedAt,
 		&i.Email,
 		&i.HashedPassword,
+		&i.IsChirpyRed,
 	)
 	return i, err
+}
+
+const setUserToRedByID = `-- name: SetUserToRedByID :exec
+UPDATE users
+  SET is_chirpy_red = TRUE
+  WHERE id = $1
+`
+
+func (q *Queries) SetUserToRedByID(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, setUserToRedByID, id)
+	return err
 }
 
 const updateUserEmailAndPassword = `-- name: UpdateUserEmailAndPassword :one
 UPDATE users
   SET email = $1, hashed_password = $2, updated_at = NOW()
   WHERE id = $3
-  RETURNING id, created_at, updated_at, email
+  RETURNING id, created_at, updated_at, email, is_chirpy_red
 `
 
 type UpdateUserEmailAndPasswordParams struct {
@@ -89,10 +103,11 @@ type UpdateUserEmailAndPasswordParams struct {
 }
 
 type UpdateUserEmailAndPasswordRow struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 func (q *Queries) UpdateUserEmailAndPassword(ctx context.Context, arg UpdateUserEmailAndPasswordParams) (UpdateUserEmailAndPasswordRow, error) {
@@ -103,6 +118,7 @@ func (q *Queries) UpdateUserEmailAndPassword(ctx context.Context, arg UpdateUser
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Email,
+		&i.IsChirpyRed,
 	)
 	return i, err
 }
